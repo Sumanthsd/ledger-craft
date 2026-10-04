@@ -39,6 +39,16 @@ const server = http.createServer(async (req, res) => {
       if (Number(input.paid || 0) > 0) await sql`insert into payments (order_id, amount, paid_on, note) values (${order.id}, ${Number(input.paid)}, ${paidDate}, ${input.notes || null})`
       return json(res, 201, { id: order.order_number, customer: customerRow.name, service: input.service, detail: input.detail || '', charge: Number(input.charge || 0), paid: Number(input.paid || 0), status: Number(input.paid || 0) >= Number(input.charge || 0) ? 'Paid' : 'Pending', date: input.date || 'Today' })
     }
+    if (req.url.startsWith('/api/orders/') && (req.method === 'PATCH' || req.method === 'DELETE')) {
+      const orderNumber = decodeURIComponent(req.url.split('/').pop())
+      const existing = (await sql`select id, order_number, customer_id, stitching_charge from orders where order_number=${orderNumber}`)[0]
+      if (!existing) return json(res, 404, { error: 'Order not found' })
+      if (req.method === 'DELETE') { await sql`delete from orders where id=${existing.id}`; return json(res, 200, { ok: true }) }
+      const input = await body(req), charge = Number(input.charge ?? existing.stitching_charge), paid = Number(input.paid ?? 0)
+      await sql`update orders set service_name=${input.service ?? undefined}, details=${input.detail ?? undefined}, material_cost=${Number(input.materialCost ?? 0)}, stitching_charge=${charge}, status=${paid >= charge ? 'Paid' : 'Pending'}, order_date=${input.date && input.date !== 'Today' ? input.date : undefined} where id=${existing.id}`
+      if (input.paid !== undefined) { await sql`delete from payments where order_id=${existing.id}`; if (paid > 0) await sql`insert into payments (order_id, amount, paid_on, note) values (${existing.id}, ${paid}, ${input.paidDate || new Date().toISOString().slice(0,10)}, ${input.notes || null})` }
+      return json(res, 200, { ok: true })
+    }
     if (req.url === '/api/orders' && req.method === 'GET') {
       const rows = await sql`select o.order_number as id, c.name as customer, c.phone as mobile, o.service_name as service, o.details as detail, o.material_cost as "materialCost", o.stitching_charge as charge, coalesce(sum(p.amount),0) as paid, o.status, to_char(o.order_date,'YYYY-MM-DD') as date from orders o join customers c on c.id=o.customer_id left join payments p on p.order_id=o.id group by o.id,c.name,c.phone order by o.order_date desc,o.created_at desc`
       return json(res, 200, rows)
