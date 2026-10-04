@@ -16,12 +16,29 @@ async function ensureSchema() {
 }
 
 const json = (res, status, body) => { res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-origin': '*' }); res.end(JSON.stringify(body)) }
+const body = req => new Promise((resolve, reject) => { let data=''; req.on('data', chunk => data += chunk); req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}) } catch (error) { reject(error) } }); req.on('error', reject) })
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,OPTIONS', 'access-control-allow-headers': 'content-type' }); return res.end() }
     if (req.url === '/api/health') return json(res, 200, { ok: true, database: 'neon-postgres' })
+    if (req.url === '/api/customers' && req.method === 'POST') {
+      const input = await body(req)
+      if (!input.name) return json(res, 400, { error: 'Customer name is required' })
+      const [customer] = await sql`insert into customers (name, phone) values (${input.name}, ${input.mobile || input.phone || null}) returning id, name, phone`
+      return json(res, 201, customer)
+    }
+    if (req.url === '/api/orders' && req.method === 'POST') {
+      const input = await body(req)
+      if (!input.customer || !input.service) return json(res, 400, { error: 'Customer and stitching type are required' })
+      const [customer] = await sql`insert into customers (name, phone) values (${input.customer}, ${input.mobile || null}) on conflict do nothing returning id, name, phone`
+      const customerRow = customer || (await sql`select id, name, phone from customers where name=${input.customer} order by created_at desc limit 1`)[0]
+      const orderNumber = input.orderNumber || `LC-${Date.now()}`, today = new Date().toISOString().slice(0,10), orderDate = input.date && input.date !== 'Today' ? input.date : today, paidDate = input.paidDate || input.materialDate || today
+      const [order] = await sql`insert into orders (order_number, customer_id, service_name, details, material_cost, stitching_charge, status, order_date) values (${orderNumber}, ${customerRow.id}, ${input.service}, ${input.detail || [input.color, input.material].filter(Boolean).join(' · ') || null}, ${Number(input.materialCost || 0)}, ${Number(input.charge || 0)}, ${Number(input.paid || 0) >= Number(input.charge || 0) ? 'Paid' : 'Pending'}, ${orderDate}) returning id, order_number`
+      if (Number(input.paid || 0) > 0) await sql`insert into payments (order_id, amount, paid_on, note) values (${order.id}, ${Number(input.paid)}, ${paidDate}, ${input.notes || null})`
+      return json(res, 201, { id: order.order_number, customer: customerRow.name, service: input.service, detail: input.detail || '', charge: Number(input.charge || 0), paid: Number(input.paid || 0), status: Number(input.paid || 0) >= Number(input.charge || 0) ? 'Paid' : 'Pending', date: input.date || 'Today' })
+    }
     if (req.url === '/api/orders' && req.method === 'GET') {
-      const rows = await sql`select o.order_number as id, c.name as customer, o.service_name as service, o.details as detail, o.stitching_charge as charge, coalesce(sum(p.amount),0) as paid, o.status, to_char(o.order_date,'DD Mon YYYY') as date from orders o join customers c on c.id=o.customer_id left join payments p on p.order_id=o.id group by o.id,c.name order by o.order_date desc,o.created_at desc`
+      const rows = await sql`select o.order_number as id, c.name as customer, c.phone as mobile, o.service_name as service, o.details as detail, o.material_cost as "materialCost", o.stitching_charge as charge, coalesce(sum(p.amount),0) as paid, o.status, to_char(o.order_date,'YYYY-MM-DD') as date from orders o join customers c on c.id=o.customer_id left join payments p on p.order_id=o.id group by o.id,c.name,c.phone order by o.order_date desc,o.created_at desc`
       return json(res, 200, rows)
     }
     return json(res, 404, { error: 'Not found' })
