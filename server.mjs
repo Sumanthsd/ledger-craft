@@ -30,8 +30,10 @@ const server = http.createServer(async (req, res) => {
     if (req.url === '/api/orders' && req.method === 'POST') {
       const input = await body(req)
       if (!input.customer || !input.service) return json(res, 400, { error: 'Customer and stitching type are required' })
-      const [customer] = await sql`insert into customers (name, phone) values (${input.customer}, ${input.mobile || null}) on conflict do nothing returning id, name, phone`
-      const customerRow = customer || (await sql`select id, name, phone from customers where name=${input.customer} order by created_at desc limit 1`)[0]
+      let customerRow = (await sql`select id, name, phone from customers where name=${input.customer} order by created_at asc limit 1`)[0]
+      if (!customerRow) {
+        [customerRow] = await sql`insert into customers (name, phone) values (${input.customer}, ${input.mobile || null}) returning id, name, phone`
+      }
       const orderNumber = input.orderNumber || `LC-${Date.now()}`, today = new Date().toISOString().slice(0,10), orderDate = input.date && input.date !== 'Today' ? input.date : today, paidDate = input.paidDate || input.materialDate || today
       const [order] = await sql`insert into orders (order_number, customer_id, service_name, details, material_cost, stitching_charge, status, order_date) values (${orderNumber}, ${customerRow.id}, ${input.service}, ${input.detail || [input.color, input.material].filter(Boolean).join(' · ') || null}, ${Number(input.materialCost || 0)}, ${Number(input.charge || 0)}, ${Number(input.paid || 0) >= Number(input.charge || 0) ? 'Paid' : 'Pending'}, ${orderDate}) returning id, order_number`
       if (Number(input.paid || 0) > 0) await sql`insert into payments (order_id, amount, paid_on, note) values (${order.id}, ${Number(input.paid)}, ${paidDate}, ${input.notes || null})`
